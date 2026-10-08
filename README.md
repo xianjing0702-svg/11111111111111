@@ -20,13 +20,17 @@ Task currently:
 
 6. main c (no need do yet)
 
-Difference betwween .h   and  .c
+、----------------------------------------------------------------
+****Difference betwween .h   and  .c
 .h is tell the program WHAT exists
 .c is tell WHAT actual the program is 
+------------------------------------------------------------------
+
+
 
 The flowchart:
 
- \                 COMP1028 PROJECT
+ 、                COMP1028 PROJECT
                            │
                            ▼
                  ┌─────────────────┐
