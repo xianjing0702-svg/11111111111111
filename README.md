@@ -1,4 +1,6 @@
 I will divide the project into a few parts. 
+Everyone pls take one of the task to do.
+
 
 Task currently: 
 1.Build document management
