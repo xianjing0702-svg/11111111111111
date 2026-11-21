@@ -6,7 +6,22 @@
 #include <string.h>
 #include <ctype.h>
 
-/* Initialise an empty collection */
+/*
+ * init_collection - PUBLIC API
+ * ----------------------------
+ * Input:
+ *   collection - caller-owned Collection pointer; NULL is accepted safely.
+ *
+ * Action:
+ *   Sets documents to NULL and count/capacity to 0. No files are loaded and
+ *   no memory is allocated.
+ *
+ * Expected output:
+ *   None. The Collection is ready to be passed to load_collection().
+ *
+ * Memory:
+ *   Nothing to free here. Call free_collection() after loading/using documents.
+ */
 void init_collection(Collection *collection)
 {
     if (collection == NULL)
@@ -19,7 +34,22 @@ void init_collection(Collection *collection)
     collection->capacity = 0;
 }
 
-/* Free all memory used by the collection */
+/*
+ * free_collection - PUBLIC API
+ * ----------------------------
+ * Input:
+ *   collection - Collection previously initialised/loaded; NULL is safe.
+ *
+ * Action:
+ *   Frees each document's text buffer, then frees the dynamic documents array,
+ *   and resets count/capacity to 0.
+ *
+ * Expected output:
+ *   None. All pointers returned by get_document() become invalid.
+ *
+ * Memory:
+ *   This is the required cleanup function for load_collection().
+ */
 void free_collection(Collection *collection)
 {
     size_t i;
@@ -42,7 +72,23 @@ void free_collection(Collection *collection)
     collection->capacity = 0;
 }
 
-/* Add capacity when more documents are needed */
+/*
+ * reserve_documents - INTERNAL HELPER (static)
+ * --------------------------------------------
+ * Input:
+ *   collection - non-NULL Collection whose capacity may need to grow.
+ *
+ * Action:
+ *   Ensures at least one free Document slot exists, using realloc() to double
+ *   capacity when full.
+ *
+ * Expected output:
+ *   Returns 1 on success or 0 on overflow/allocation failure.
+ *
+ * Memory:
+ *   May reallocate collection->documents. The Collection owns the new block;
+ *   free_collection() releases it later. Callers must not free it directly.
+ */
 static int reserve_documents(Collection *collection)
 {
     size_t new_capacity;
@@ -79,7 +125,25 @@ static int reserve_documents(Collection *collection)
     return 1;
 }
 
-/* Read an entire text file into memory */
+/*
+ * read_text_file - INTERNAL HELPER (static)
+ * -----------------------------------------
+ * Input:
+ *   path        - filesystem path to an existing text file.
+ *   text_length - output pointer receiving the number of bytes read.
+ *
+ * Action:
+ *   Opens the file in binary mode and reads the entire contents into a growing
+ *   heap buffer, adding a terminating '\0'.
+ *
+ * Expected output:
+ *   Returns a malloc-allocated, null-terminated string on success; NULL on
+ *   open/read/allocation failure.
+ *
+ * Memory:
+ *   The returned buffer is owned by the caller and must be freed. On success,
+ *   load_collection() stores it as Document.text.
+ */
 static char *read_text_file(
     const char *path,
     size_t *text_length
@@ -166,9 +230,27 @@ static char *read_text_file(
     return buffer;
 }
 
-/* Check whether a filename is safe to use */
+/*
+ * valid_filename - INTERNAL HELPER (static)
+ * -----------------------------------------
+ * Input:
+ *   filename - relative path read from the manifest.
+ *
+ * Action:
+ *   Rejects NULL/empty names, names longer than MAX_FILENAME, absolute paths,
+ *   Windows drive-letter paths, and empty/"."/".." path components. Safe
+ *   relative subpaths such as comp.graphics/37261 are accepted.
+ *
+ * Expected output:
+ *   Returns 1 when safe to combine with the documents folder, else 0.
+ *
+ * Memory:
+ *   No allocation and nothing to free.
+ */
 static int valid_filename(const char *filename)
 {
+    const char *component;
+
     if (filename == NULL || filename[0] == '\0')
     {
         return 0;
@@ -179,18 +261,62 @@ static int valid_filename(const char *filename)
         return 0;
     }
 
-    if (strchr(filename, '/') != NULL ||
-        strchr(filename, '\\') != NULL ||
-        strcmp(filename, ".") == 0 ||
-        strcmp(filename, "..") == 0)
+    /* Reject absolute paths and Windows drive-letter paths. */
+    if (filename[0] == '/' || filename[0] == '\\' ||
+        (isalpha((unsigned char)filename[0]) && filename[1] == ':'))
     {
         return 0;
+    }
+
+    /* Reject empty, "." and ".." path components. */
+    component = filename;
+
+    while (*component != '\0')
+    {
+        const char *start = component;
+        size_t length;
+
+        while (*component != '\0' &&
+               *component != '/' &&
+               *component != '\\')
+        {
+            component++;
+        }
+
+        length = (size_t)(component - start);
+
+        if (length == 0 ||
+            (length == 1 && start[0] == '.') ||
+            (length == 2 && start[0] == '.' && start[1] == '.'))
+        {
+            return 0;
+        }
+
+        if (*component != '\0')
+        {
+            component++;
+        }
     }
 
     return 1;
 }
 
-/* Build the full path to a document */
+/*
+ * build_path - INTERNAL HELPER (static)
+ * -------------------------------------
+ * Input:
+ *   folder   - base directory containing documents.
+ *   filename - validated relative filename/path.
+ *
+ * Action:
+ *   Allocates and joins folder and filename, inserting '/' when needed.
+ *
+ * Expected output:
+ *   Returns a malloc-allocated path string, or NULL on allocation failure.
+ *
+ * Memory:
+ *   The caller owns the returned path and must free() it after fopen/read.
+ */
 static char *build_path(
     const char *folder,
     const char *filename
@@ -236,11 +362,37 @@ static char *build_path(
     return path;
 }
 
-/* Load documents listed in a manifest file.
-   Supported formats:
-   123 document.txt
-   document.txt
-*/
+/*
+ * load_collection - PUBLIC API
+ * ----------------------------
+ * Input:
+ *   collection       - initialised Collection that receives loaded documents.
+ *   manifest_file    - path to a manifest containing one filename per line.
+ *                      Lines may be "filename.txt" or "id filename.txt".
+ *                      Blank lines and lines beginning with '#' are skipped.
+ *   documents_folder - base folder prepended to each manifest filename.
+ *
+ * Action:
+ *   Opens the manifest, validates each relative filename, reads each document
+ *   completely into memory, and appends a populated Document to the Collection.
+ *
+ * Expected output:
+ *   Returns the number of documents successfully loaded, or 0 when arguments
+ *   are invalid/the manifest cannot be opened. Error details go to stderr.
+ *   Each loaded Document gets an ID, filename, text, text_length, and zeroed
+ *   term statistics (later filled by process_document()).
+ *
+ * Memory:
+ *   Allocates collection->documents and each Document.text. The caller MUST
+ *   call free_collection() when finished. Do not free individual document text.
+ *
+ * Example:
+ *   Collection c;
+ *   init_collection(&c);
+ *   int n = load_collection(&c, "manifest.txt", "documents");
+ *   if (n > 0) { printf("Loaded %d documents\n", n); }
+ *   free_collection(&c);
+ */
 int load_collection(
     Collection *collection,
     const char *manifest_file,
@@ -378,7 +530,23 @@ int load_collection(
     return loaded;
 }
 
-/* Find a document by its ID */
+/*
+ * get_document - PUBLIC API
+ * -------------------------
+ * Input:
+ *   collection  - Collection to search; NULL returns NULL.
+ *   document_id - ID to locate.
+ *
+ * Action:
+ *   Performs a linear search through collection->documents[].
+ *
+ * Expected output:
+ *   Returns a borrowed pointer to the matching Document, or NULL if absent.
+ *
+ * Memory:
+ *   Do NOT free the returned pointer. It is owned by the Collection and remains
+ *   valid only until free_collection() is called.
+ */
 const Document *get_document(
     const Collection *collection,
     int document_id
@@ -402,7 +570,22 @@ const Document *get_document(
     return NULL;
 }
 
-/* Print one document */
+/*
+ * print_document - PUBLIC API
+ * ---------------------------
+ * Input:
+ *   collection  - Collection containing the document; may be NULL.
+ *   document_id - ID of the document to display.
+ *
+ * Action:
+ *   Looks up the document and prints metadata, term statistics, and full text.
+ *
+ * Expected output:
+ *   Text on stdout, or "Document ID <id> not found." when missing.
+ *
+ * Memory:
+ *   No allocation and nothing for the caller to free.
+ */
 void print_document(
     const Collection *collection,
     int document_id
@@ -425,7 +608,22 @@ void print_document(
     printf("\nContent:\n%s\n", doc->text);
 }
 
-/* Print collection statistics */
+/*
+ * print_collection_statistics - PUBLIC API
+ * ----------------------------------------
+ * Input:
+ *   collection - Collection to summarise; may be NULL.
+ *
+ * Action:
+ *   Sums text bytes, total terms, and unique terms across all documents.
+ *
+ * Expected output:
+ *   Prints a statistics block to stdout. Term totals are meaningful only after
+ *   process_collection() has filled the per-document term fields.
+ *
+ * Memory:
+ *   No allocation and nothing for the caller to free.
+ */
 void print_collection_statistics(
     const Collection *collection
 )
